@@ -1,0 +1,148 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows;
+using SharpHook;
+using SharpHook.Data;
+
+namespace PoeAncientsPriceHelper;
+
+public partial class App : System.Windows.Application
+{
+    internal static bool DebugMode { get; private set; }
+    private TaskPoolGlobalHook? _hook;
+    private bool _leftCtrlDown;
+
+    // Single-instance guard. Held for the lifetime of the process; a second launch fails to
+    // create it, focuses the already-running window, and exits. Without this, every extra launch
+    // is a full second app that also receives the global F3 hook and paints its own overlay —
+    // which is how testers ended up seeing two or three calibration boxes at once.
+    private static Mutex? _instanceMutex;
+    private const string InstanceMutexName = @"Global\PoeAncientsPriceHelper.SingleInstance";
+
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    private const int SW_RESTORE = 9;
+
+    // Hide the overlay immediately (if it's up because a panel was detected) and pause detection
+    // briefly so the closing panel's fading brightness can't re-trigger it.
+    private static void DismissOverlay()
+    {
+        if (!ScanEngine.IsShowing) return;
+        PriceOverlayManager.HideNow();   // instant, off the scan loop
+        ScanEngine.RequestDismiss();     // keep it hidden until the panel actually closes
+    }
+
+    [DllImport("kernel32.dll")] private static extern bool AllocConsole();
+    [DllImport("kernel32.dll")] private static extern bool AttachConsole(int dwProcessId);
+
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        // Headless OCR repro: run the real OCR pipeline on a screenshot and print what it sees.
+        //   PoeAncientsPriceHelper.exe --ocr-test <imagePath>
+        if (e.Args.Length >= 2 && e.Args[0] == "--ocr-test")
+        {
+            RunOcrTest(e.Args[1]);
+            Environment.Exit(0);
+            return;
+        }
+
+        base.OnStartup(e);
+
+        // Refuse to start a second copy: only one instance owns the global hook + overlay.
+        _instanceMutex = new Mutex(initiallyOwned: true, InstanceMutexName, out bool createdNew);
+        if (!createdNew)
+        {
+            FocusExistingInstance();
+            Shutdown();
+            return;
+        }
+
+        if (e.Args.Contains("--debug"))
+        {
+            DebugMode = true;
+            if (!AttachConsole(-1)) AllocConsole(); // attach to parent terminal, else open new window
+            Console.WriteLine("[Debug] PoeAncientsPriceHelper starting");
+        }
+
+        _hook = new TaskPoolGlobalHook();
+        _hook.KeyPressed += (_, ev) =>
+        {
+            // ESC closes the in-game panel — hide the overlay the instant the key goes down.
+            if (ev.Data.KeyCode == KeyCode.VcEscape) DismissOverlay();
+            else if (ev.Data.KeyCode is KeyCode.VcLeftControl) _leftCtrlDown = true;
+        };
+        _hook.KeyReleased += (_, ev) =>
+        {
+            if (ev.Data.KeyCode == KeyCode.VcF3) PriceOverlayManager.ToggleDebug();
+            else if (ev.Data.KeyCode is KeyCode.VcLeftControl) _leftCtrlDown = false;
+        };
+        // Left-Ctrl + left click (the in-game "purchase" gesture) also dismisses the overlay.
+        _hook.MousePressed += (_, ev) =>
+        {
+            if (ev.Data.Button == MouseButton.Button1 && _leftCtrlDown) DismissOverlay();
+        };
+        _ = _hook.RunAsync();
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        _hook?.Dispose();
+        _instanceMutex?.Dispose();
+        base.OnExit(e);
+    }
+
+    // Bring the already-running instance's window to the foreground so the user gets feedback that
+    // the app is up (instead of "nothing happened, click again" — which spawned the extra copies).
+    private static void FocusExistingInstance()
+    {
+        try
+        {
+            var me = Process.GetCurrentProcess();
+            foreach (var p in Process.GetProcessesByName(me.ProcessName))
+            {
+                if (p.Id == me.Id) continue;
+                if (p.MainWindowHandle == IntPtr.Zero) continue;
+                ShowWindow(p.MainWindowHandle, SW_RESTORE);
+                SetForegroundWindow(p.MainWindowHandle);
+                break;
+            }
+        }
+        catch { /* best-effort focus; the guard still prevents the second instance */ }
+    }
+
+    private static void RunOcrTest(string imagePath)
+    {
+        var outPath = System.IO.Path.Combine(AppContext.BaseDirectory, "ocr_test.txt");
+        var lines = new List<string>();
+        void Out(string s) => lines.Add(s);
+        try
+        {
+            var config = ConfigStore.Load();
+            var r = config.RegionRect;
+            Out($"[ocr-test] image='{imagePath}' region={r}");
+            using var full = (System.Drawing.Bitmap)System.Drawing.Image.FromFile(imagePath);
+            Out($"[ocr-test] image size {full.Width}x{full.Height}");
+
+            // Crop the calibrated region (or use the whole image if it's already the region).
+            var rect = System.Drawing.Rectangle.Intersect(
+                new System.Drawing.Rectangle(0, 0, full.Width, full.Height), r);
+            if (rect.Width <= 0 || rect.Height <= 0) rect = new System.Drawing.Rectangle(0, 0, full.Width, full.Height);
+            using var region = new System.Drawing.Bitmap(rect.Width, rect.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            using (var g = System.Drawing.Graphics.FromImage(region))
+                g.DrawImage(full, new System.Drawing.Rectangle(0, 0, rect.Width, rect.Height), rect, System.Drawing.GraphicsUnit.Pixel);
+
+            var tessdata = System.IO.Path.Combine(AppContext.BaseDirectory, "tessdata");
+            using var scanner = new OcrScanner(tessdata, Out);
+            var rows = scanner.Scan(region);
+            Out($"[ocr-test] merged {rows.Count} rows:");
+            foreach (var row in rows)
+                Out($"    y={row.CenterY} mult={row.Multiplier} norm='{row.NormalizedName}' raw='{row.RawText}'");
+        }
+        catch (Exception ex)
+        {
+            Out($"[ocr-test] ERROR {ex}");
+        }
+        try { System.IO.File.WriteAllLines(outPath, lines); } catch { }
+    }
+}

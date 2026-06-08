@@ -1,0 +1,231 @@
+using System.Drawing;
+using System.Drawing.Imaging;
+using Tesseract;
+
+namespace PoeAncientsPriceHelper;
+
+internal sealed record OcrRow(string NormalizedName, string RawText, int CenterY, int Multiplier = 1);
+
+internal sealed class OcrScanner : IDisposable
+{
+    // Two independent engines so the two segmentation passes can run concurrently — Tesseract
+    // engines are single-threaded internally, but separate instances on separate threads are fine.
+    private readonly TesseractEngine _engineCol;
+    private readonly TesseractEngine _engineSparse;
+    private readonly Action<string>? _log;
+    private readonly object _logLock = new();
+    private const float MinConfidence = 10f;
+    private const int UpscaleFactor = 2;
+    private const int MinNameLength = 4;
+    // A real row must contain a word at least this long. 4 (not 5) so two-short-word names
+    // like "Void Flux" survive; OCR fragments are still mostly 1–3 char tokens.
+    private const int MinWordLength = 4;
+
+    public OcrScanner(string tessdataDir, Action<string>? log = null)
+    {
+        _engineCol = new TesseractEngine(tessdataDir, "eng", EngineMode.Default);
+        _engineSparse = new TesseractEngine(tessdataDir, "eng", EngineMode.Default);
+        _log = log;
+    }
+
+    // Each row starts with ~3 cost-rune glyphs on the left, then "Nx ItemName". Cropping the
+    // left IconColumnFraction removes the glyphs (which produce leading OCR garbage) while
+    // keeping the quantity marker and the name. RightTrimFraction shaves the panel's right
+    // border, which otherwise tacks stray characters onto the last word.
+    // (internal so the overlay can draw a box matching exactly what is OCR'd.)
+    internal const double IconColumnFraction = 0.30;
+    internal const double RightTrimFraction = 0.02;
+
+    public IReadOnlyList<OcrRow> Scan(Bitmap regionBitmap)
+    {
+        int leftCut = Math.Max(1, (int)(regionBitmap.Width * IconColumnFraction));
+        int rightCut = (int)(regionBitmap.Width * RightTrimFraction);
+        int cropW = Math.Max(1, regionBitmap.Width - leftCut - rightCut);
+        using var cropped = CropBitmap(regionBitmap, leftCut, 0, cropW, regionBitmap.Height);
+        using var inverted = Preprocess(cropped);
+        using var upscaled = Upscale(inverted, UpscaleFactor);
+        byte[] png = ToPng(upscaled);
+        int height = regionBitmap.Height;
+
+        // Two segmentation passes merged by row position, run CONCURRENTLY (one engine each) to
+        // halve latency. SingleColumn reads ordinary lists cleanly; SparseText rescues panels whose
+        // strong beveled row dividers make the other modes see only the top line. At each row keep
+        // whichever pass produced the fuller text.
+        var tCol = Task.Run(() => RunPass(_engineCol, png, PageSegMode.SingleColumn, height));
+        var tSparse = Task.Run(() => RunPass(_engineSparse, png, PageSegMode.SparseText, height));
+        Task.WaitAll(tCol, tSparse);
+        var rows = MergeByPosition(tCol.Result, tSparse.Result);
+
+        // When OCR catches few rows, dump the exact image fed to Tesseract for inspection.
+        if (rows.Count <= 2)
+        {
+            try { upscaled.Save(Path.Combine(AppContext.BaseDirectory, "debug_ocr.png"), System.Drawing.Imaging.ImageFormat.Png); }
+            catch { /* best-effort diagnostic */ }
+        }
+        return rows;
+    }
+
+    private IReadOnlyList<OcrRow> RunPass(TesseractEngine engine, byte[] png, PageSegMode mode, int regionHeight)
+    {
+        using var pix = Pix.LoadFromMemory(png);
+        using var page = engine.Process(pix, mode);
+        return ExtractRows(page, regionHeight, UpscaleFactor);
+    }
+
+    private static IReadOnlyList<OcrRow> MergeByPosition(IReadOnlyList<OcrRow> a, IReadOnlyList<OcrRow> b)
+    {
+        const int Tol = 25;   // px: reads within this vertical distance are the same row
+        static int Letters(string s) { int c = 0; foreach (var ch in s) if (char.IsLetter(ch)) c++; return c; }
+
+        var result = new List<OcrRow>(a);
+        foreach (var rb in b)
+        {
+            int idx = -1;
+            for (int i = 0; i < result.Count; i++)
+                if (Math.Abs(result[i].CenterY - rb.CenterY) <= Tol) { idx = i; break; }
+            if (idx < 0) result.Add(rb);
+            else if (Letters(rb.NormalizedName) > Letters(result[idx].NormalizedName)) result[idx] = rb;
+        }
+        result.Sort((x, y) => x.CenterY.CompareTo(y.CenterY));
+        return result;
+    }
+
+    private static Bitmap CropBitmap(Bitmap src, int x, int y, int w, int h)
+    {
+        var dst = new Bitmap(w, h, PixelFormat.Format24bppRgb);
+        using var g = Graphics.FromImage(dst);
+        g.DrawImage(src, new Rectangle(0, 0, w, h), new Rectangle(x, y, w, h), GraphicsUnit.Pixel);
+        return dst;
+    }
+
+    private IReadOnlyList<OcrRow> ExtractRows(Page page, int bitmapHeight, int scale = 1)
+    {
+        var rows = new List<OcrRow>();
+        var diag = new List<string>();
+        using var iter = page.GetIterator();
+        iter.Begin();
+        do
+        {
+            if (!iter.TryGetBoundingBox(PageIteratorLevel.TextLine, out var box)) continue;
+            var text = iter.GetText(PageIteratorLevel.TextLine);
+            float conf = iter.GetConfidence(PageIteratorLevel.TextLine);
+            // Bounding box coords are in upscaled space — divide back to original coords
+            int centerY = Math.Clamp((box.Y1 + (box.Y2 - box.Y1) / 2) / scale, 0, bitmapHeight - 1);
+
+            string? reject = null;
+            string normalized = "";
+            int multiplier = 1;
+            if (string.IsNullOrWhiteSpace(text)) reject = "empty";
+            else if (conf < MinConfidence) reject = "lowconf";
+            else
+            {
+                var normalizedRaw = NormalizeName(text);
+                multiplier = ExtractMultiplier(normalizedRaw);
+                normalized = StripLeadingNoise(normalizedRaw);
+                if (normalized.Length < MinNameLength) reject = "short";
+                else if (!HasLongWord(normalized, MinWordLength)) reject = "noword";
+            }
+
+            if (reject is null)
+                rows.Add(new OcrRow(normalized, text.Trim(), centerY, multiplier));
+            diag.Add($"y={centerY} conf={conf:0} '{(text ?? "").Trim()}'{(reject is null ? "" : $" REJ:{reject}")}");
+        }
+        while (iter.Next(PageIteratorLevel.TextLine));
+
+        // Diagnostic: when few rows survive, show every line Tesseract actually produced so we
+        // can tell "Tesseract only saw 1 line" from "saw 5 but the filters dropped 4".
+        // Runs on a pass thread — serialize so two concurrent passes don't race the logger.
+        if (rows.Count <= 2 && diag.Count > 0)
+            lock (_logLock) { _log?.Invoke($"OCR raw {diag.Count} lines → " + string.Join(" | ", diag)); }
+
+        return rows;
+    }
+
+    private static Bitmap Upscale(Bitmap src, int factor)
+    {
+        var dst = new Bitmap(src.Width * factor, src.Height * factor, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+        using var g = Graphics.FromImage(dst);
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        g.DrawImage(src, 0, 0, dst.Width, dst.Height);
+        return dst;
+    }
+
+    // The list shows a stack quantity as "Nx" before the item name ("1x", "2x", "14x").
+    // Capture it so the price can be multiplied by the stack size. Read from the raw
+    // normalized string BEFORE StripLeadingNoise removes the marker. Returns 1 when absent.
+    internal static int ExtractMultiplier(string normalized)
+    {
+        var m = Regex.Match(normalized, @"(?<![a-z0-9])(\d{1,3})\s*x(?![a-z0-9])");
+        if (m.Success && int.TryParse(m.Groups[1].Value, out var n) && n >= 1)
+            return Math.Min(n, 999);
+        return 1;
+    }
+
+    // Strip leading noise: short/numeric tokens ("e", "l8"), then anything before the first
+    // quantity marker ("1x", "11x"), then remaining leading non-alpha chars.
+    // e.g. "krogin 1x ancient rune of decay"  → "ancient rune of decay"
+    // e.g. "e l8 n 1x the greatwolf"          → "the greatwolf"
+    internal static string StripLeadingNoise(string normalized)
+    {
+        var s = Regex.Replace(normalized, @"^(?:\S{1,2}\s+|\S*\d\S*\s+)+", "");
+        // If a quantity marker still exists, drop everything before (and including) it
+        var qm = Regex.Match(s, @"(?<!\w)\d+\s*x\s+");
+        if (qm.Success) s = s.Substring(qm.Index + qm.Length);
+        s = Regex.Replace(s, @"^[^a-z]+", "");
+        return s.Trim();
+    }
+
+    private static bool HasLongWord(string normalized, int minLen)
+    {
+        int run = 0;
+        foreach (char c in normalized)
+        {
+            if (char.IsLetter(c)) { if (++run >= minLen) return true; }
+            else run = 0;
+        }
+        return false;
+    }
+
+    // Invert: PoE list panel has light text on dark background.
+    // Tesseract works better with dark-on-light.
+    private static Bitmap Preprocess(Bitmap src)
+    {
+        var dst = new Bitmap(src.Width, src.Height, PixelFormat.Format24bppRgb);
+        using var g = Graphics.FromImage(dst);
+        g.DrawImage(src, 0, 0);
+        InvertBitmap(dst);
+        return dst;
+    }
+
+    private static void InvertBitmap(Bitmap bmp)
+    {
+        var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+            ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
+        try
+        {
+            int len = data.Stride * bmp.Height;
+            var buf = new byte[len];
+            System.Runtime.InteropServices.Marshal.Copy(data.Scan0, buf, 0, len);
+            for (int i = 0; i < buf.Length; i++) buf[i] = (byte)(255 - buf[i]);
+            System.Runtime.InteropServices.Marshal.Copy(buf, 0, data.Scan0, len);
+        }
+        finally { bmp.UnlockBits(data); }
+    }
+
+    private static byte[] ToPng(Bitmap bmp)
+    {
+        using var ms = new MemoryStream();
+        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+        return ms.ToArray();
+    }
+
+    internal static string NormalizeName(string text)
+    {
+        var s = text.ToLowerInvariant();
+        s = Regex.Replace(s, @"[^\w\s]", " ");
+        s = Regex.Replace(s, @"\s+", " ");
+        return s.Trim();
+    }
+
+    public void Dispose() { _engineCol.Dispose(); _engineSparse.Dispose(); }
+}

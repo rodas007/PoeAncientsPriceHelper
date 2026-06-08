@@ -1,0 +1,318 @@
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace PoeAncientsPriceHelper;
+
+// DivineValue / ExaltedValue are the PER-UNIT prices; Multiplier is the stack size read from
+// the "Nx" marker. The overlay shows total (unit × multiplier) with the unit price in parentheses.
+// Name is the normalized item name (used to confirm/lock a row across OCR passes).
+// ExactMatch = the name matched a price key exactly (not via prefix/fuzzy) — high confidence,
+// so it can lock on the first read instead of needing a second confirming read.
+// Meme: easter-egg rows that show a special icon + caption instead of a real price.
+//   Mirror     — OCR'd "5x random currency" → Mirror of Kalandra icon + "5 Mirrors" (always ranks top).
+//   Headhunter — OCR'd "unique belt"        → Headhunter icon + "Headhunter!".
+internal enum MemeKind { None, Mirror, Headhunter }
+
+internal sealed record PriceRow(int CenterY, string OcrText, decimal DivineValue, decimal ExaltedValue, bool HasPrice, int Multiplier = 1, string Name = "", bool ExactMatch = false, MemeKind Meme = MemeKind.None);
+
+internal sealed class PriceOverlayForm : Form
+{
+    private IReadOnlyList<PriceRow> _rows = [];
+    private bool _panelOpen;
+    private bool _reading;  // panel detected, prices not yet resolved → show a "reading…" hint
+    private bool _debug;   // F3 toggles the diagnostic boxes/region/"?" text; prices show regardless
+    private readonly IconCache _icons;
+    private readonly Rectangle _regionRect;
+    private readonly int _xOffset;
+    private readonly Font _priceFont = new("Consolas", 20, FontStyle.Bold);
+    private readonly Font _debugFont = new("Consolas", 18, FontStyle.Regular);
+    private const int IconSize = 38;
+    private const int RowHalfHeight = 25;
+
+    public PriceOverlayForm(Rectangle screenBounds, Rectangle regionRect, int xOffset, IconCache icons)
+    {
+        _regionRect = regionRect;
+        _xOffset = xOffset;
+        _icons = icons;
+        FormBorderStyle = FormBorderStyle.None;
+        TopMost = true;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        Bounds = screenBounds;
+        BackColor = Color.Black;
+        TransparencyKey = Color.Black;
+        DoubleBuffered = true;
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_LAYERED = 0x00080000;
+            const int WS_EX_TRANSPARENT = 0x00000020;
+            const int WS_EX_NOACTIVATE = 0x08000000;
+            var cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+            return cp;
+        }
+    }
+
+    public void UpdateState(IReadOnlyList<PriceRow> rows, bool panelOpen, bool reading)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke(() => UpdateState(rows, panelOpen, reading)); return; }
+        _rows = rows;
+        _panelOpen = panelOpen;
+        _reading = reading;
+        ApplyVisibility();
+        Invalidate();
+    }
+
+    // F3 toggles debug visuals (row boxes, region outline, OCR "?" text). Prices are unaffected.
+    public void ToggleDebug()
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke(ToggleDebug); return; }
+        _debug = !_debug;
+        ApplyVisibility();
+        Invalidate();
+    }
+
+    private void ApplyVisibility()
+    {
+        // Visible when prices are ready, while reading (to show the hint), or in debug mode.
+        bool shouldShow = _panelOpen || _reading || _debug;
+        if (shouldShow && !Visible) { Show(); ForceTopmost(); }
+        else if (!shouldShow && Visible) Hide();
+    }
+
+    // Hide the window right now, off the hotkey thread — instant ESC/close response without
+    // waiting for the (slower, OCR-bound) scan loop to come around. Debug mode keeps it visible.
+    public void HideNow()
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke(HideNow); return; }
+        _panelOpen = false;
+        _reading = false;
+        ApplyVisibility();
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        // Debug-only: outline of the calibrated region (orange=not detected, green=detected).
+        if (_debug)
+        {
+            var borderColor = _panelOpen ? Color.LimeGreen : Color.Orange;
+            using var borderPen = new Pen(borderColor, 2);
+            g.DrawRectangle(borderPen, _regionRect);
+        }
+
+        if (!_panelOpen) return;
+
+        int priceX = _regionRect.Right + _xOffset;
+
+        // Box geometry matches the slice fed to OCR (left glyph column cut, right border trimmed).
+        int ocrLeft = _regionRect.Left + (int)(_regionRect.Width * OcrScanner.IconColumnFraction);
+        int ocrRight = _regionRect.Right - (int)(_regionRect.Width * OcrScanner.RightTrimFraction);
+
+        // Identify the most valuable priced row (by total = unit × multiplier, in divine terms)
+        // so it can be highlighted. Only meaningful when more than one item is priced.
+        PriceRow? topRow = null;
+        int pricedCount = 0;
+        decimal topValue = -1m;
+        foreach (var row in _rows)
+        {
+            if (!row.HasPrice) continue;
+            pricedCount++;
+            // Meme rows outrank real prices: the mirror ("most expensive currency in the game")
+            // always takes the crown, with Headhunter just below it — both above any real value.
+            decimal value = row.Meme switch
+            {
+                MemeKind.Mirror => decimal.MaxValue,
+                MemeKind.Headhunter => decimal.MaxValue - 1m,
+                _ => row.DivineValue * Math.Max(1, row.Multiplier),
+            };
+            if (value > topValue) { topValue = value; topRow = row; }
+        }
+
+        foreach (var row in _rows)
+        {
+            int screenY = _regionRect.Top + row.CenterY;
+
+            // Debug layer: per-row boxes + the OCR text for rows that didn't resolve to a price.
+            if (_debug)
+            {
+                var rowBox = new Rectangle(ocrLeft, screenY - RowHalfHeight, ocrRight - ocrLeft, RowHalfHeight * 2);
+                if (row.HasPrice)
+                {
+                    using var greenPen = new Pen(Color.LimeGreen, 1);
+                    g.DrawRectangle(greenPen, rowBox);
+                }
+                else
+                {
+                    using var yellowPen = new Pen(Color.Yellow, 1) { DashStyle = DashStyle.Dash };
+                    g.DrawRectangle(yellowPen, rowBox);
+                    using var grayBrush = new SolidBrush(Color.FromArgb(200, Color.Gray));
+                    g.DrawString($"? {row.OcrText}", _debugFont, grayBrush, priceX, screenY - 7);
+                }
+            }
+
+            // Always-on layer: the price (icon + number) for any priced row, boxes or not.
+            if (row.HasPrice)
+            {
+                bool isTop = pricedCount > 1 && ReferenceEquals(row, topRow);
+                DrawPrice(g, row, priceX, screenY, isTop);
+            }
+        }
+    }
+
+    private void DrawPrice(Graphics g, PriceRow row, int x, int screenY, bool highlightTop)
+    {
+        // Easter eggs: a special icon + caption instead of a real price.
+        if (row.Meme == MemeKind.Mirror)
+        {
+            DrawIcon(g, _icons.Mirror, "M", x, screenY - IconSize / 2);
+            using var memeBrush = new SolidBrush(Color.FromArgb(180, 230, 255)); // mirror-silver
+            g.DrawString("5 Mirrors", _priceFont, memeBrush, x + IconSize + 2, screenY - _priceFont.Height / 2);
+            return;
+        }
+        if (row.Meme == MemeKind.Headhunter)
+        {
+            // Headhunter's belt art is 2:1, so draw it double-wide and push the caption past it.
+            const int hhWidth = IconSize * 2;
+            if (_icons.Headhunter is { } hh && _icons.IsAvailable)
+                g.DrawImage(hh, new Rectangle(x, screenY - IconSize / 2, hhWidth, IconSize));
+            using var hhBrush = new SolidBrush(Color.FromArgb(223, 142, 60)); // unique-item gold
+            g.DrawString("Headhunter!", _priceFont, hhBrush, x + hhWidth + 2, screenY - _priceFont.Height / 2);
+            return;
+        }
+
+        int iconY = screenY - IconSize / 2;
+        int mult = Math.Max(1, row.Multiplier);
+        // Currency choice is per-unit so single-item display is unchanged.
+        bool useDivine = row.DivineValue >= 1.0m;
+        decimal unit = useDivine ? row.DivineValue : row.ExaltedValue;
+        decimal total = unit * mult;
+        string fmt = useDivine ? "0.00" : "0.#";
+
+        DrawIcon(g, useDivine ? _icons.Divine : _icons.Exalted, useDivine ? "d" : "ex", x, iconY);
+
+        // Multiple items: show total, then per-each price in parentheses.
+        string label = mult > 1
+            ? $"{total.ToString(fmt)} ({unit.ToString(fmt)} each)"
+            : total.ToString(fmt);
+        // Most valuable row → bright green; otherwise gold (divine) / white (exalted).
+        var color = highlightTop ? Color.FromArgb(80, 255, 120) : (useDivine ? Color.Gold : Color.White);
+        using var brush = new SolidBrush(color);
+        // Vertically center the (now smaller) text against the row, not the icon top.
+        int textY = screenY - _priceFont.Height / 2;
+        g.DrawString(label, _priceFont, brush, x + IconSize + 2, textY);
+    }
+
+    private void DrawIcon(Graphics g, Bitmap? icon, string fallback, int x, int y)
+    {
+        if (icon != null && _icons.IsAvailable)
+            g.DrawImage(icon, new Rectangle(x, y, IconSize, IconSize));
+        else
+        {
+            using var brush = new SolidBrush(Color.White);
+            g.DrawString(fallback, _priceFont, brush, x, y);
+        }
+    }
+
+    protected override void OnShown(EventArgs e) { base.OnShown(e); ForceTopmost(); }
+
+    public void ForceTopmost()
+    {
+        if (IsDisposed || !IsHandleCreated || !Visible) return;
+        if (InvokeRequired) { BeginInvoke(ForceTopmost); return; }
+        // SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE — no SWP_SHOWWINDOW (0x40) which would un-hide a hidden form
+        SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { _priceFont.Dispose(); _debugFont.Dispose(); }
+        base.Dispose(disposing);
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+}
+
+internal static class PriceOverlayManager
+{
+    private static PriceOverlayForm? _form;
+    private static Thread? _thread;
+    private static readonly object _lock = new();
+
+    public static void EnsureVisible(Rectangle regionRect, int xOffset, IconCache icons)
+    {
+        lock (_lock)
+        {
+            if (_form is not null && !_form.IsDisposed)
+            {
+                var existing = _form;
+                existing.Invoke(() => { if (!existing.IsDisposed && !existing.Visible) existing.Show(); });
+                return;
+            }
+
+            var screen = Screen.PrimaryScreen!.Bounds;
+            using var ready = new ManualResetEventSlim(false);
+            _thread = new Thread(() =>
+            {
+                var f = new PriceOverlayForm(screen, regionRect, xOffset, icons);
+                f.Shown += (_, _) => ready.Set();
+                _form = f;
+                System.Windows.Forms.Application.Run(f);
+                lock (_lock) _form = null;
+            }) { IsBackground = true, Name = "PriceOverlay-STA" };
+            _thread.SetApartmentState(ApartmentState.STA);
+            _thread.Start();
+            ready.Wait(TimeSpan.FromSeconds(2));
+        }
+    }
+
+    public static void Hide()
+    {
+        lock (_lock)
+        {
+            var f = _form;
+            if (f is null || f.IsDisposed) return;
+            f.Invoke(() => { if (!f.IsDisposed) f.Close(); });
+        }
+    }
+
+    public static void UpdateState(IReadOnlyList<PriceRow> rows, bool panelOpen, bool reading)
+    {
+        var f = _form;
+        if (f is not null && !f.IsDisposed) f.UpdateState(rows, panelOpen, reading);
+    }
+
+    public static void ForceTopmost()
+    {
+        var f = _form;
+        if (f is not null && !f.IsDisposed) f.ForceTopmost();
+    }
+
+    public static void ToggleDebug()
+    {
+        var f = _form;
+        if (f is not null && !f.IsDisposed) f.ToggleDebug();
+    }
+
+    public static void HideNow()
+    {
+        var f = _form;
+        if (f is not null && !f.IsDisposed) f.HideNow();
+    }
+}

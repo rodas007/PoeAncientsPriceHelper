@@ -1,0 +1,33 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+/publish/
+/release/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+
+# Runtime + dev artifacts (generated, not source)
+config.json
+scan_log.txt
+ocr_test.txt
+debug_ocr.png
+
+# Loose screenshots / fixtures used only for local docs & testing
+Screenshot_*.png
+list_1.png
+sample.png
+sample 1.png
+
+# Currency icons fetched from the CDN at first run
+divine.png
+exalted.png
+mirror.png
+headhunter.png
+
+# Claude Code dev tooling, notes, and local settings — kept out of the public repo
+.claude/
