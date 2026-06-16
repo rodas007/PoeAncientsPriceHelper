@@ -464,7 +464,7 @@ public partial class MainWindow : MetroWindow
     }
 
     // --- Currency display mode ---
-    private void CurrencyMode_Changed(object sender, SelectionChangedEventArgs e)
+    private void CurrencyMode_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (_loading) return;
         if (CurrencyModeBox.SelectedItem is System.Windows.Controls.ComboBoxItem item && item.Tag is string tag)
