@@ -2,23 +2,21 @@ using System.Drawing;
 using System.Diagnostics;
 
 namespace PoeAncientsPriceHelper;
-
 /// <summary>
 /// Auto-detects the exchange panel region by scanning screen brightness patterns.
-/// The exchange panel has a distinctive bright rectangular region against the dark game world.
+/// The exchange panel has a distinctive rectangular region with a parchment-colored
+/// background against the dark game world.
 /// </summary>
 internal static class AutoCalibrator
 {
-    // The exchange panel is typically: bright background, rows of items, ~300-600px wide, ~200-500px tall.
-    // We scan the screen for a contiguous bright rectangle that matches these dimensions.
-
-    private const int SampleStep = 8;           // pixel step for scanning (speed vs accuracy)
-    private const int MinPanelWidth = 200;      // minimum expected panel width
-    private const int MinPanelHeight = 150;     // minimum expected panel height
-    private const int MaxPanelWidth = 800;      // maximum expected panel width
-    private const int MaxPanelHeight = 700;     // maximum expected panel height
-    private const int BrightnessThreshold = 90; // average brightness to consider "panel"
-    private const int EdgeTolerance = 5;        // brightness drop tolerance at edges
+    private const int SampleStep = 4;           // finer step for better accuracy
+    private const int MinPanelWidth = 150;      // minimum expected panel width
+    private const int MinPanelHeight = 100;     // minimum expected panel height
+    private const int MaxPanelWidth = 900;
+    private const int MaxPanelHeight = 800;
+    // PoE2 exchange panels have a parchment/tan background — R,G,B all above ~55
+    private const int ColorMin = 50;            // minimum per-channel to count as "panel pixel"
+    private const int PanelPixelRatio = 30;     // % of pixels in region that must be "panel"
 
     /// <summary>
     /// Attempts to auto-detect the exchange panel region on any monitor.
@@ -28,7 +26,6 @@ internal static class AutoCalibrator
     {
         try
         {
-            // Capture the full virtual screen
             var screen = SystemInformation.VirtualScreen;
             using var bmp = new Bitmap(screen.Width, screen.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
             using (var g = Graphics.FromImage(bmp))
@@ -36,18 +33,18 @@ internal static class AutoCalibrator
                 g.CopyFromScreen(screen.Location, Point.Empty, screen.Size);
             }
 
-            // Scan for bright horizontal bands
-            var bands = FindBrightBands(bmp, screen);
-            if (bands.Count == 0) return null;
+            // Strategy: scan for rectangular regions where a large % of pixels
+            // have the parchment-like color (R,G,B all > ColorMin, warm tone).
+            var candidate = FindPanelByColor(bmp, screen);
+            if (candidate is { } r && r.Width >= MinPanelWidth && r.Height >= MinPanelHeight)
+                return r;
 
-            // Find the tallest contiguous bright region
-            var region = FindContiguousRegion(bmp, bands, screen);
-            if (region is null || region.Value.Width < MinPanelWidth || region.Value.Height < MinPanelHeight)
-                return null;
+            // Fallback: brightness-based detection
+            var fallback = FindPanelByBrightness(bmp, screen);
+            if (fallback is { } r2 && r2.Width >= MinPanelWidth && r2.Height >= MinPanelHeight)
+                return r2;
 
-            // Trim edges to remove non-panel borders
-            var trimmed = TrimToContent(bmp, region.Value);
-            return trimmed;
+            return null;
         }
         catch
         {
@@ -55,176 +52,203 @@ internal static class AutoCalibrator
         }
     }
 
-    private static List<int> FindBrightBands(Bitmap bmp, Rectangle screen)
+    /// <summary>
+    /// Find panel by looking for regions with high concentration of warm/parchment-colored pixels.
+    /// </summary>
+    private static Rectangle? FindPanelByColor(Bitmap bmp, Rectangle screen)
     {
-        var bands = new List<int>();
-        int h = bmp.Height;
-        int w = bmp.Width;
+        int w = bmp.Width, h = bmp.Height;
+        int step = SampleStep;
 
-        for (int y = 0; y < h; y += SampleStep)
+        // Scan vertical bands: for each row, count "panel pixels" (warm parchment color)
+        int[] rowCounts = new int[h];
+        for (int y = 0; y < h; y += step)
         {
-            long sum = 0;
             int count = 0;
-            // Sample middle 60% of the screen width (skip edges)
-            int xStart = w / 5;
-            int xEnd = w * 4 / 5;
-
-            for (int x = xStart; x < xEnd; x += SampleStep)
+            for (int x = 0; x < w; x += step)
             {
                 var px = bmp.GetPixel(x, y);
-                sum += (px.R + px.G + px.B) / 3;
-                count++;
+                // Parchment: R > 50, G > 50, B > 40, and R+B > G (warm tone)
+                if (px.R > ColorMin && px.G > ColorMin && px.B > ColorMin - 10
+                    && px.R + px.B >= px.G)
+                    count++;
             }
-
-            if (count > 0 && sum / count > BrightnessThreshold)
-                bands.Add(y);
+            rowCounts[y] = count;
         }
 
-        return bands;
-    }
+        // Find contiguous vertical regions with high panel-pixel density
+        int panelWidthSamples = w / step;
+        int threshold = panelWidthSamples * PanelPixelRatio / 100;
 
-    private static Rectangle? FindContiguousRegion(Bitmap bmp, List<int> bands, Rectangle screen)
-    {
-        if (bands.Count == 0) return null;
+        int bestTop = -1, bestBottom = -1, bestHeight = 0;
+        int curTop = -1;
 
-        // Group consecutive bands into regions
-        int regionStart = bands[0];
-        int prevBand = bands[0];
-        int bestStart = regionStart;
-        int bestEnd = bands[0];
-        int bestHeight = 0;
-
-        foreach (var band in bands)
+        for (int y = 0; y < h; y += step)
         {
-            if (band - prevBand <= SampleStep * 2) // contiguous (allow small gaps)
+            if (rowCounts[y] >= threshold)
             {
-                prevBand = band;
+                if (curTop < 0) curTop = y;
             }
             else
             {
-                // End of contiguous region
-                int height = prevBand - regionStart;
-                if (height > bestHeight && height >= MinPanelHeight)
+                if (curTop >= 0)
                 {
-                    bestStart = regionStart;
-                    bestEnd = prevBand;
-                    bestHeight = height;
+                    int height = y - curTop;
+                    if (height > bestHeight && height >= MinPanelHeight)
+                    {
+                        bestTop = curTop;
+                        bestBottom = y;
+                        bestHeight = height;
+                    }
+                    curTop = -1;
                 }
-                regionStart = band;
-                prevBand = band;
+            }
+        }
+        if (curTop >= 0)
+        {
+            int height = h - curTop;
+            if (height > bestHeight && height >= MinPanelHeight)
+            {
+                bestTop = curTop;
+                bestBottom = h;
             }
         }
 
-        // Check final region
-        int finalHeight = prevBand - regionStart;
-        if (finalHeight > bestHeight && finalHeight >= MinPanelHeight)
-        {
-            bestStart = regionStart;
-            bestEnd = prevBand;
-        }
+        if (bestTop < 0) return null;
 
-        if (bestEnd - bestStart < MinPanelHeight) return null;
-
-        // Now find horizontal extent at the vertical center
-        int centerY = (bestStart + bestEnd) / 2;
-        int left = FindLeftEdge(bmp, centerY, screen);
-        int right = FindRightEdge(bmp, centerY, screen);
+        // Find horizontal extent at vertical center
+        int centerY = (bestTop + bestBottom) / 2;
+        int left = FindColorEdge(bmp, centerY, w, step, true);
+        int right = FindColorEdge(bmp, centerY, w, step, false);
 
         if (right - left < MinPanelWidth) return null;
 
         return new Rectangle(
             screen.X + left,
-            screen.Y + bestStart,
+            screen.Y + bestTop,
             right - left,
-            bestEnd - bestStart
+            bestBottom - bestTop
         );
     }
 
-    private static int FindLeftEdge(Bitmap bmp, int y, Rectangle screen)
+    private static int FindColorEdge(Bitmap bmp, int y, int w, int step, bool fromLeft)
     {
-        int w = bmp.Width;
-        for (int x = 0; x < w / 2; x += SampleStep)
+        if (fromLeft)
         {
-            var px = bmp.GetPixel(x, y);
-            int brightness = (px.R + px.G + px.B) / 3;
-            if (brightness > BrightnessThreshold)
-                return Math.Max(0, x - EdgeTolerance);
+            for (int x = 0; x < w / 2; x += step)
+            {
+                var px = bmp.GetPixel(x, y);
+                if (px.R > ColorMin && px.G > ColorMin && px.B > ColorMin - 10)
+                    return Math.Max(0, x - 2);
+            }
+            return 0;
         }
-        return 0;
+        else
+        {
+            for (int x = w - 1; x > w / 2; x -= step)
+            {
+                var px = bmp.GetPixel(x, y);
+                if (px.R > ColorMin && px.G > ColorMin && px.B > ColorMin - 10)
+                    return Math.Min(w, x + 2);
+            }
+            return w;
+        }
     }
 
-    private static int FindRightEdge(Bitmap bmp, int y, Rectangle screen)
+    /// <summary>
+    /// Fallback: brightness-based detection with lower threshold.
+    /// </summary>
+    private static Rectangle? FindPanelByBrightness(Bitmap bmp, Rectangle screen)
     {
-        int w = bmp.Width;
-        for (int x = w - 1; x > w / 2; x -= SampleStep)
+        int w = bmp.Width, h = bmp.Height;
+        int step = SampleStep;
+        int threshold = 55; // lower than before (was 90)
+
+        int[] rowBrightness = new int[h];
+        for (int y = 0; y < h; y += step)
         {
-            var px = bmp.GetPixel(x, y);
-            int brightness = (px.R + px.G + px.B) / 3;
-            if (brightness > BrightnessThreshold)
-                return Math.Min(w, x + EdgeTolerance);
+            int count = 0, bright = 0;
+            for (int x = w / 5; x < w * 4 / 5; x += step)
+            {
+                var px = bmp.GetPixel(x, y);
+                int b = (px.R + px.G + px.B) / 3;
+                count++;
+                if (b > threshold) bright++;
+            }
+            rowBrightness[y] = count > 0 && (double)bright / count > 0.25 ? bright : 0;
         }
-        return w;
+
+        int bestTop = -1, bestBottom = -1, bestHeight = 0;
+        int curTop = -1;
+
+        for (int y = 0; y < h; y += step)
+        {
+            if (rowBrightness[y] > 0)
+            {
+                if (curTop < 0) curTop = y;
+            }
+            else
+            {
+                if (curTop >= 0)
+                {
+                    int height = y - curTop;
+                    if (height > bestHeight && height >= MinPanelHeight)
+                    {
+                        bestTop = curTop;
+                        bestBottom = y;
+                        bestHeight = height;
+                    }
+                    curTop = -1;
+                }
+            }
+        }
+        if (curTop >= 0)
+        {
+            int height = h - curTop;
+            if (height > bestHeight && height >= MinPanelHeight)
+            {
+                bestTop = curTop;
+                bestBottom = h;
+            }
+        }
+
+        if (bestTop < 0) return null;
+
+        int centerY = (bestTop + bestBottom) / 2;
+        int left = FindBrightEdge(bmp, centerY, w, step, threshold, true);
+        int right = FindBrightEdge(bmp, centerY, w, step, threshold, false);
+
+        if (right - left < MinPanelWidth) return null;
+
+        return new Rectangle(
+            screen.X + left,
+            screen.Y + bestTop,
+            right - left,
+            bestBottom - bestTop
+        );
     }
 
-    private static Rectangle TrimToContent(Bitmap bmp, Rectangle region)
+    private static int FindBrightEdge(Bitmap bmp, int y, int w, int step, int threshold, bool fromLeft)
     {
-        // Fine-tune: find actual content bounds within the detected region
-        int left = region.X, right = region.X + region.Width;
-        int top = region.Y, bottom = region.Y + region.Height;
-        int screenW = bmp.Width, screenH = bmp.Height;
-
-        // Trim top
-        for (int y = region.Y; y < region.Y + region.Height / 2; y += 2)
+        if (fromLeft)
         {
-            if (IsBrightRow(bmp, y, region.X, region.X + region.Width))
-            { top = y; break; }
+            for (int x = 0; x < w / 2; x += step)
+            {
+                var px = bmp.GetPixel(x, y);
+                if ((px.R + px.G + px.B) / 3 > threshold)
+                    return Math.Max(0, x - 3);
+            }
+            return 0;
         }
-
-        // Trim bottom
-        for (int y = region.Y + region.Height - 1; y > region.Y + region.Height / 2; y -= 2)
+        else
         {
-            if (IsBrightRow(bmp, y, region.X, region.X + region.Width))
-            { bottom = y; break; }
+            for (int x = w - 1; x > w / 2; x -= step)
+            {
+                var px = bmp.GetPixel(x, y);
+                if ((px.R + px.G + px.B) / 3 > threshold)
+                    return Math.Min(w, x + 3);
+            }
+            return w;
         }
-
-        // Trim left
-        for (int x = region.X; x < region.X + region.Width / 2; x += 2)
-        {
-            if (IsBrightCol(bmp, x, top, bottom))
-            { left = x; break; }
-        }
-
-        // Trim right
-        for (int x = region.X + region.Width - 1; x > region.X + region.Width / 2; x -= 2)
-        {
-            if (IsBrightCol(bmp, x, top, bottom))
-            { right = x; break; }
-        }
-
-        return Rectangle.FromLTRB(left, top, right, bottom);
-    }
-
-    private static bool IsBrightRow(Bitmap bmp, int y, int xStart, int xEnd)
-    {
-        int count = 0, bright = 0;
-        for (int x = xStart; x < xEnd; x += SampleStep)
-        {
-            var px = bmp.GetPixel(Math.Min(x, bmp.Width - 1), Math.Min(y, bmp.Height - 1));
-            count++;
-            if ((px.R + px.G + px.B) / 3 > BrightnessThreshold) bright++;
-        }
-        return count > 0 && (double)bright / count > 0.5;
-    }
-
-    private static bool IsBrightCol(Bitmap bmp, int x, int yStart, int yEnd)
-    {
-        int count = 0, bright = 0;
-        for (int y = yStart; y < yEnd; y += SampleStep)
-        {
-            var px = bmp.GetPixel(Math.Min(x, bmp.Width - 1), Math.Min(y, bmp.Height - 1));
-            count++;
-            if ((px.R + px.G + px.B) / 3 > BrightnessThreshold) bright++;
-        }
-        return count > 0 && (double)bright / count > 0.5;
     }
 }
