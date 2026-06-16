@@ -533,4 +533,3 @@ internal sealed class ScanEngine : IDisposable
         _lastExpensiveState = anyExpensiveSnipe;
     }
 }
-}
