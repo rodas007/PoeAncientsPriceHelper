@@ -497,7 +497,6 @@ internal static class PriceOverlayManager
         var f = _form;
         if (f is not null && !f.IsDisposed) f.CopyHoveredItemName();
     }
-}
 
     // --- Copy-to-clipboard: Ctrl+C copies the hovered row's item name ---
     private int _hoveredRowIndex = -1;
@@ -528,3 +527,4 @@ internal static class PriceOverlayManager
         }
         catch { }
     }
+}

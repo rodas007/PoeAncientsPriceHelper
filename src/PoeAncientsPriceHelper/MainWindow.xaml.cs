@@ -415,7 +415,6 @@ public partial class MainWindow : MetroWindow
         RebindDebugButton.IsEnabled = enabled;
         RebindCalibrateButton.IsEnabled = enabled;
     }
-}
 
     // --- Auto-detect button ---
     private void AutoDetectButton_Click(object sender, RoutedEventArgs e)

@@ -297,7 +297,7 @@ internal sealed class PriceRepository : IDisposable
         public decimal ExaltedValue { get; set; }
         public decimal ChaosValue { get; set; }
     }
-}
+    }
 
     // --- Offline cache: save last fetch to JSON so prices survive poe.ninja downtime ---
     private static string CachePath => Path.Combine(AppContext.BaseDirectory, "price_cache.json");

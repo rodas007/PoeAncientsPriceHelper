@@ -500,7 +500,6 @@ internal sealed class ScanEngine : IDisposable
         StopAndWait(TimeSpan.FromSeconds(2));
         _cts?.Dispose();
     }
-}
 
     // --- Snipe sound alert ---
     private bool _lastSnipeState;
@@ -533,4 +532,5 @@ internal sealed class ScanEngine : IDisposable
         _lastSnipeState = anySnipe;
         _lastExpensiveState = anyExpensiveSnipe;
     }
+}
 }
