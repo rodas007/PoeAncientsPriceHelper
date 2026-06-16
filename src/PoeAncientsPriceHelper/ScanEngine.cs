@@ -188,7 +188,7 @@ internal sealed class ScanEngine : IDisposable
                             }
                             else
                             {
-                                var reads = BuildPriceRows(ocrRows);
+                                var reads = BuildPriceRows(ocrRows, _prices.History);
                                 Log($"OCR {ocrRows.Count} rows → " +
                                     string.Join(" | ", reads.Select(r =>
                                         $"raw='{r.OcrText.Trim()}' y={r.CenterY} " +
@@ -251,7 +251,7 @@ internal sealed class ScanEngine : IDisposable
         Log("loop exited");
     }
 
-    private IReadOnlyList<PriceRow> BuildPriceRows(IReadOnlyList<OcrRow> ocrRows)
+    private IReadOnlyList<PriceRow> BuildPriceRows(IReadOnlyList<OcrRow> ocrRows, PriceHistory history)
     {
         var snapshot = _prices.Prices;
         var rows = new List<PriceRow>(ocrRows.Count);
@@ -279,10 +279,10 @@ internal sealed class ScanEngine : IDisposable
             {
                 if (gemKey is not null && snapshot.TryGetValue(gemKey, out var gemEntry))
                     rows.Add(new PriceRow(stableY, row.RawText, gemEntry.DivineValue, gemEntry.ExaltedValue,
-                        true, row.Multiplier, gemKey, true));
+                        gemEntry.ChaosValue, true, row.Multiplier, gemKey, true));
                 else
                     // Recognised as an uncut gem but type+level didn't pin to a known price → '?', never fuzzy.
-                    rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, false, row.Multiplier, row.NormalizedName));
+                    rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, 0m, false, row.Multiplier, row.NormalizedName));
                 continue;
             }
 
@@ -292,12 +292,12 @@ internal sealed class ScanEngine : IDisposable
             //    currency") → Mirror of Kalandra. "unique belt" → Headhunter.
             if (row.NormalizedName.Contains("random") && row.NormalizedName.Contains("currency"))
             {
-                rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, true, row.Multiplier, "random currency", true, MemeKind.Mirror));
+                rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, 0m, true, row.Multiplier, "random currency", true, MemeKind.Mirror));
                 continue;
             }
             if (row.NormalizedName.Contains("unique") && row.NormalizedName.Contains("belt"))
             {
-                rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, true, row.Multiplier, "unique belt", true, MemeKind.Headhunter));
+                rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, 0m, true, row.Multiplier, "unique belt", true, MemeKind.Headhunter));
                 continue;
             }
 
@@ -327,9 +327,10 @@ internal sealed class ScanEngine : IDisposable
             }
 
             if (entry != null)
-                rows.Add(new PriceRow(stableY, row.RawText, entry.DivineValue, entry.ExaltedValue, true, row.Multiplier, matchedKey, exact));
+                bool isSnipe = history.IsSnipe(matchedKey, entry.DivineValue, out _);
+                rows.Add(new PriceRow(stableY, row.RawText, entry.DivineValue, entry.ExaltedValue, entry.ChaosValue, true, row.Multiplier, matchedKey, exact, MemeKind.None, isSnipe));
             else
-                rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, false, row.Multiplier, row.NormalizedName));
+                rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, 0m, false, row.Multiplier, row.NormalizedName));
         }
         _lastPositions = newPositions;
         return rows;
@@ -485,7 +486,7 @@ internal sealed class ScanEngine : IDisposable
         {
             display.Add(s.Locked
                 ? s.LockedRow
-                : s.Latest with { CenterY = s.Y, HasPrice = false, DivineValue = 0m, ExaltedValue = 0m });
+                : s.Latest with { CenterY = s.Y, HasPrice = false, DivineValue = 0m, ExaltedValue = 0m, ChaosValue = 0m });
         }
         return display;
     }

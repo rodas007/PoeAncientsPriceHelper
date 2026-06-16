@@ -17,7 +17,7 @@ namespace PoeAncientsPriceHelper;
 //   Headhunter — OCR'd "unique belt"        → Headhunter icon + "Headhunter!".
 internal enum MemeKind { None, Mirror, Headhunter }
 
-internal sealed record PriceRow(int CenterY, string OcrText, decimal DivineValue, decimal ExaltedValue, bool HasPrice, int Multiplier = 1, string Name = "", bool ExactMatch = false, MemeKind Meme = MemeKind.None);
+internal sealed record PriceRow(int CenterY, string OcrText, decimal DivineValue, decimal ExaltedValue, decimal ChaosValue, bool HasPrice, int Multiplier = 1, string Name = "", bool ExactMatch = false, MemeKind Meme = MemeKind.None, bool IsSnipe = false);
 
 internal sealed class PriceOverlayForm : Form
 {
@@ -250,30 +250,51 @@ internal sealed class PriceOverlayForm : Form
 
         int iconY = screenY - IconSize / 2;
         int mult = Math.Max(1, row.Multiplier);
-        // Currency choice is per-unit so single-item display is unchanged.
+
+        // Tier: divine (>=1d) → exalted (>=0.05d) → chaos (<0.05d)
         bool useDivine = row.DivineValue >= 1.0m;
-        decimal unit = useDivine ? row.DivineValue : row.ExaltedValue;
+        bool useChaos = !useDivine && row.DivineValue < 0.05m && row.ChaosValue > 0;
+        decimal unit;
+        string fmt;
+        if (useDivine) { unit = row.DivineValue; fmt = "0.00"; }
+        else if (useChaos) { unit = row.ChaosValue; fmt = "0.#"; }
+        else { unit = row.ExaltedValue; fmt = "0.#"; }
         decimal total = unit * mult;
-        string fmt = useDivine ? "0.00" : "0.#";
+
         // Always format prices with a '.' decimal separator regardless of the machine's locale —
         // PoE prices are universally written with a dot, and it avoids "0,1"-style confusion on
         // comma-decimal locales (e.g. pt-BR).
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-
         // Multiple items: show total, then per-each price in parentheses.
         string label = mult > 1
             ? $"{total.ToString(fmt, inv)} ({unit.ToString(fmt, inv)} each)"
             : total.ToString(fmt, inv);
 
         DrawBackdrop(g, x, screenY, IconSize + 2 + TextWidth(g, label));
-        DrawIcon(g, useDivine ? _icons.Divine : _icons.Exalted, useDivine ? "d" : "ex", x, iconY);
+        DrawIcon(g,
+            useDivine ? _icons.Divine : useChaos ? _icons.Exalted : _icons.Exalted,
+            useDivine ? "d" : useChaos ? "c" : "ex", x, iconY);
 
-        // Most valuable row → bright green; otherwise gold (divine) / white (exalted).
-        var color = highlightTop ? Color.FromArgb(80, 255, 120) : (useDivine ? Color.Gold : Color.White);
+        // Most valuable row → bright green; divine=gold, chaos=orange, exalted=white.
+        var color = highlightTop ? Color.FromArgb(80, 255, 120)
+            : useDivine ? Color.Gold
+            : useChaos ? Color.FromArgb(255, 165, 0)  // orange for chaos
+            : Color.White;
         using var brush = new SolidBrush(color);
         // Vertically center the (now smaller) text against the row, not the icon top.
         int textY = screenY - _priceFont.Height / 2;
         g.DrawString(label, _priceFont, brush, x + IconSize + 2, textY);
+
+        // Snipe indicator: flashing red "SNIP!" label when item is abnormally cheap
+        if (row.IsSnipe)
+        {
+            bool flashOn = (Environment.TickCount / 500) % 2 == 0;
+            if (flashOn)
+            {
+                using var snipeBrush = new SolidBrush(Color.FromArgb(200, 255, 50, 50));
+                g.DrawString("SNIP!", _priceFont, snipeBrush, x + IconSize + 2 + TextWidth(g, label) + 6, textY);
+            }
+        }
     }
 
     private int TextWidth(Graphics g, string s) => (int)Math.Ceiling(g.MeasureString(s, _priceFont).Width);

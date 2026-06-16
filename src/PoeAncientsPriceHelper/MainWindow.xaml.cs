@@ -135,6 +135,23 @@ public partial class MainWindow : MetroWindow
         _repo = new PriceRepository(_http);
         _repo.PricesUpdated += OnPricesUpdated;   // keep the "last fetch" label live on each refresh
         _icons = new IconCache(_http);
+        // Fetch available leagues from poe.ninja (first time only)
+        if (!_config.LeaguesFetchedFromApi)
+        {
+            try
+            {
+                var leagues = await PriceRepository.FetchAvailableLeaguesAsync(_http);
+                if (leagues.Count > 0)
+                {
+                    _config.AvailableLeagues = new List<string>(leagues);
+                    _config.LeaguesFetchedFromApi = true;
+                    if (!_config.AvailableLeagues.Contains(_config.LeagueName))
+                        _config.LeagueName = _config.AvailableLeagues[0];
+                    Dispatcher.Invoke(() => PopulateFields());
+                }
+            }
+            catch { /* offline — keep fallback leagues */ }
+        }
 
         await Task.WhenAll(
             _repo.InitialFetchAsync(_config),

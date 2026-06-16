@@ -7,7 +7,7 @@ namespace PoeAncientsPriceHelper;
 
 // DivineValue  = price in divine orbs (primaryValue from API)
 // ExaltedValue = DivineValue * core.rates.exalted (computed, for display when < 1 divine)
-internal sealed record PriceEntry(decimal DivineValue, decimal ExaltedValue);
+internal sealed record PriceEntry(decimal DivineValue, decimal ExaltedValue, decimal ChaosValue);
 
 internal sealed class PriceRepository : IDisposable
 {
@@ -28,12 +28,52 @@ internal sealed class PriceRepository : IDisposable
     // thread-pool thread; subscribers must marshal to the UI thread.
     public event Action? PricesUpdated;
 
+    /// <summary>Price history for snipe detection.</summary>
+    public PriceHistory History { get; } = new();
+
     // UncutGems shares the exact same response shape as the others: a root items[] maps each
     // line id (e.g. "uncut-spirit-gem-19") to a display name that already carries the level
     // ("Uncut Spirit Gem (Level 19)"), which NormalizeName reduces to "uncut spirit gem level 19" —
     // the same string the OCR produces. So no special parsing is needed; matching safety (pinning
     // the gem type + level) lives in ScanEngine.BuildPriceRows.
     private static readonly string[] ExchangeTypes = ["Verisium", "Runes", "Expedition", "Currency", "UncutGems"];
+
+    /// <summary>
+    /// Fetch available league names from poe.ninja for PoE2.
+    /// Returns the display names (e.g. "Runes of Aldur", "HC Runes of Aldur").
+    /// On failure, returns a fallback list so the app still works.
+    /// </summary>
+    public static async Task<IReadOnlyList<string>> FetchAvailableLeaguesAsync(HttpClient http, CancellationToken ct = default)
+    {
+        var fallback = new[] { "Runes of Aldur", "HC Runes of Aldur" };
+        try
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, "https://poe.ninja/poe2");
+            req.Headers.TryAddWithoutValidation("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36");
+            var resp = await http.SendAsync(req, ct);
+            if (!resp.IsSuccessStatusCode) return fallback;
+            var html = await resp.Content.ReadAsStringAsync(ct);
+
+            // League names are embedded in the Astro page data as "name":[0,"Runes of Aldur"]
+            // We look for the poe2IndexState economyLeagues section
+            var leagues = new List<string>();
+            // Pattern: "displayName":[0,"<league name>"] inside the poe2 economy leagues
+            var matches = Regex.Matches(html, @"""displayName"":\[0,""([^""]+)""\]");
+            foreach (Match m in matches)
+            {
+                var name = m.Groups[1].Value;
+                // Only keep PoE2 trade leagues (exclude SSF, Ruthless, events, PoE1 leagues)
+                if (name.Contains("SSF") || name.Contains("Ruthless") || name.Contains("PL")) continue;
+                if (!leagues.Contains(name)) leagues.Add(name);
+            }
+            return leagues.Count > 0 ? leagues.ToArray() : fallback;
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
 
     public PriceRepository(HttpClient http) => _http = http;
 
@@ -62,6 +102,7 @@ internal sealed class PriceRepository : IDisposable
             }
             ApplyCustomOverride(dict, config.CustomPricesPath);
             _prices = new ReadOnlyDictionary<string, PriceEntry>(dict);
+            History.RecordSnapshot(_prices);
             LastFetchedAt = DateTime.Now;
             PricesUpdated?.Invoke();
         }
@@ -131,6 +172,9 @@ internal sealed class PriceRepository : IDisposable
             var rates = core?["rates"];
             var divinePerPrimary = primary == "divine" ? 1m : rates?["divine"]?.Value<decimal>() ?? 0m;
             var exaltedPerPrimary = primary == "exalted" ? 1m : rates?["exalted"]?.Value<decimal>() ?? 1m;
+            // 1 divine = N chaos → 1 primary = (divinePerPrimary * chaosPerDivine) chaos
+            var chaosPerDivine = rates?["chaos"]?.Value<decimal>() ?? 0m;
+            var chaosPerPrimary = divinePerPrimary * chaosPerDivine;
 
             if (obj["lines"] is not JArray lines) return result;
             foreach (var line in lines)
@@ -140,9 +184,10 @@ internal sealed class PriceRepository : IDisposable
                 var primaryValue = line["primaryValue"]?.Value<decimal>() ?? 0m;
                 var divineValue = primaryValue * divinePerPrimary;
                 var exaltedValue = Math.Round(primaryValue * exaltedPerPrimary, 1);
+                var chaosValue = Math.Round(primaryValue * chaosPerPrimary, 1);
                 var key = NormalizeName(name);
                 if (!string.IsNullOrEmpty(key))
-                    result[key] = new PriceEntry(divineValue, exaltedValue);
+                    result[key] = new PriceEntry(divineValue, exaltedValue, chaosValue);
             }
         }
         catch (Exception ex)
@@ -167,7 +212,7 @@ internal sealed class PriceRepository : IDisposable
             {
                 var key = NormalizeName(rawKey);
                 if (!string.IsNullOrEmpty(key))
-                    dict[key] = new PriceEntry(entry.DivineValue, entry.ExaltedValue);
+                    dict[key] = new PriceEntry(entry.DivineValue, entry.ExaltedValue, entry.ChaosValue);
             }
         }
         catch (Exception ex)
@@ -196,5 +241,6 @@ internal sealed class PriceRepository : IDisposable
     {
         public decimal DivineValue { get; set; }
         public decimal ExaltedValue { get; set; }
+        public decimal ChaosValue { get; set; }
     }
 }
