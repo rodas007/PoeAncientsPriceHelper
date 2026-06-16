@@ -296,6 +296,9 @@ internal sealed class PriceOverlayForm : Form
             ? $"{total.ToString(fmt, inv)} ({unit.ToString(fmt, inv)} each)"
             : total.ToString(fmt, inv);
 
+        // Vertically center the text against the row
+        int textY = screenY - _priceFont.Height / 2;
+
         DrawBackdrop(g, x, screenY, IconSize + 2 + TextWidth(g, label));
         DrawIcon(g, iconKey == "d" ? _icons.Divine : _icons.Exalted,
             iconKey, x, iconY);
@@ -315,8 +318,6 @@ internal sealed class PriceOverlayForm : Form
             : iconKey == "c" ? Color.FromArgb(255, 165, 0)  // orange for chaos
             : Color.White;
         using var brush = new SolidBrush(color);
-        // Vertically center the (now smaller) text against the row, not the icon top.
-        int textY = screenY - _priceFont.Height / 2;
         g.DrawString(label, _priceFont, brush, x + IconSize + 2, textY);
 
         // Snipe indicator: flashing red "SNIP!" label when item is abnormally cheap
