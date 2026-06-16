@@ -115,6 +115,13 @@ public partial class App : System.Windows.Application
             if (_capturing) return;
             if (ev.Data.Button == MouseButton.Button1 && _leftCtrlDown) DismissOverlay();
         };
+        // Ctrl+C: copy the hovered item name to clipboard
+        _hook.KeyReleased += (_, ev) =>
+        {
+            if (_capturing) return;
+            if (ev.Data.KeyCode == KeyCode.VcC && _leftCtrlDown)
+                PriceOverlayManager.CopyHoveredItemName();
+        };
         _ = _hook.RunAsync();
     }
 

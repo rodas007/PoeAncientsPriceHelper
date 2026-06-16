@@ -85,8 +85,9 @@ internal sealed class PriceRepository : IDisposable
     public void StartAutoRefresh(AppConfig config)
     {
         _timer?.Dispose();
+        var interval = TimeSpan.FromMinutes(Math.Max(5, config.RefreshIntervalMinutes));
         _timer = new System.Threading.Timer(_ => Task.Run(() => FetchAndMergeAsync(config, _cts.Token)),
-            null, TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(30));
+            null, interval, interval);
     }
 
     private async Task FetchAndMergeAsync(AppConfig config, CancellationToken ct)
@@ -103,6 +104,7 @@ internal sealed class PriceRepository : IDisposable
             ApplyCustomOverride(dict, config.CustomPricesPath);
             _prices = new ReadOnlyDictionary<string, PriceEntry>(dict);
             History.RecordSnapshot(_prices);
+            SaveCache(dict);
             LastFetchedAt = DateTime.Now;
             PricesUpdated?.Invoke();
         }
@@ -244,3 +246,33 @@ internal sealed class PriceRepository : IDisposable
         public decimal ChaosValue { get; set; }
     }
 }
+
+    // --- Offline cache: save last fetch to JSON so prices survive poe.ninja downtime ---
+    private static string CachePath => Path.Combine(AppContext.BaseDirectory, "price_cache.json");
+
+    private void SaveCache(Dictionary<string, PriceEntry> dict)
+    {
+        try
+        {
+            var json = JsonConvert.SerializeObject(dict, Formatting.None);
+            File.WriteAllText(CachePath, json);
+        }
+        catch { /* best-effort */ }
+    }
+
+    public bool LoadCache()
+    {
+        try
+        {
+            if (!File.Exists(CachePath)) return false;
+            var json = File.ReadAllText(CachePath);
+            var dict = JsonConvert.DeserializeObject<Dictionary<string, PriceEntry>>(json);
+            if (dict is null || dict.Count == 0) return false;
+            _prices = new ReadOnlyDictionary<string, PriceEntry>(dict);
+            History.RecordSnapshot(_prices);
+            LastFetchedAt = File.GetLastWriteTime(CachePath);
+            PricesUpdated?.Invoke();
+            return true;
+        }
+        catch { return false; }
+    }

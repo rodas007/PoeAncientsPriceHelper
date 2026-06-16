@@ -114,6 +114,13 @@ public partial class MainWindow : MetroWindow
         App.SetDebugKey(debug);
         App.SetCalibrateKey(calibrate);
         UpdateRegionLabel();
+        // Restore refresh interval and sound alert from config
+        foreach (System.Windows.Controls.ComboBoxItem item in RefreshBox.Items)
+        {
+            if (item.Tag is string tag && int.TryParse(tag, out var m) && m == _config.RefreshIntervalMinutes)
+            { RefreshBox.SelectedItem = item; break; }
+        }
+        SoundAlertCheck.IsChecked = _config.SnipeSoundAlert;
         _loading = false;
     }
 
@@ -158,6 +165,26 @@ public partial class MainWindow : MetroWindow
             _icons.LoadAsync());
 
         _repo.StartAutoRefresh(_config);
+
+        // If fetch failed (offline), try loading cached prices
+        if (_repo.ItemCount == 0)
+        {
+            if (_repo.LoadCache())
+                StatusLabel.Text = "Offline — showing cached prices";
+        }
+
+        // Auto-detect game window for monitor selection
+        if (_config.AutoDetectGameWindow)
+        {
+            var gameMonitor = GameWindowDetector.GetGameMonitor();
+            // If game is on a different monitor than calibrated region, suggest recalibration
+            if (_config.IsCalibrated)
+            {
+                var regionMonitor = Screen.FromRectangle(_config.RegionRect);
+                if (regionMonitor != gameMonitor)
+                    StatusLabel.Text += $"  ·  Game on {gameMonitor.DeviceName} (region on {regionMonitor.DeviceName})";
+            }
+        }
 
         UpdateStatusLabel();
         StartStopButton.IsEnabled = _config.IsCalibrated;
@@ -376,3 +403,50 @@ public partial class MainWindow : MetroWindow
         RebindCalibrateButton.IsEnabled = enabled;
     }
 }
+
+    // --- Auto-detect button ---
+    private void AutoDetectButton_Click(object sender, RoutedEventArgs e)
+    {
+        StatusLabel.Text = "Auto-detecting exchange panel...";
+        Task.Run(() =>
+        {
+            var region = AutoCalibrator.DetectPanel();
+            Dispatcher.Invoke(() =>
+            {
+                if (region is { } r)
+                {
+                    _config.RegionRect = r;
+                    ConfigStore.Save(_config);
+                    UpdateRegionLabel();
+                    StartStopButton.IsEnabled = _config.IsCalibrated;
+                    StatusLabel.Text = $"Auto-detected: {r.Width}×{r.Height} at ({r.X},{r.Y})";
+                }
+                else
+                {
+                    StatusLabel.Text = "Auto-detect failed — try manual calibration or move the exchange panel into view";
+                }
+            });
+        });
+    }
+
+    // --- Refresh interval ---
+    private void RefreshBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (_loading) return;
+        if (RefreshBox.SelectedItem is System.Windows.Controls.ComboBoxItem item &&
+            item.Tag is string tag && int.TryParse(tag, out var minutes))
+        {
+            _config.RefreshIntervalMinutes = minutes;
+            ConfigStore.Save(_config);
+            // Restart auto-refresh with new interval
+            _repo?.StartAutoRefresh(_config);
+        }
+    }
+
+    // --- Sound alert toggle ---
+    private void SoundAlert_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        _config.SnipeSoundAlert = SoundAlertCheck.IsChecked == true;
+        ConfigStore.Save(_config);
+    }

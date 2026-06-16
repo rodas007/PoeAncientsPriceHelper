@@ -454,4 +454,40 @@ internal static class PriceOverlayManager
         var f = _form;
         if (f is not null && !f.IsDisposed) f.HideNow();
     }
+
+    public static void CopyHoveredItemName()
+    {
+        var f = _form;
+        if (f is not null && !f.IsDisposed) f.CopyHoveredItemName();
+    }
 }
+
+    // --- Copy-to-clipboard: Ctrl+C copies the hovered row's item name ---
+    private int _hoveredRowIndex = -1;
+
+    public void CopyHoveredItemName()
+    {
+        if (_hoveredRowIndex >= 0 && _hoveredRowIndex < _rows.Count)
+        {
+            var row = _rows[_hoveredRowIndex];
+            if (row.HasPrice && !string.IsNullOrEmpty(row.Name))
+            {
+                try
+                {
+                    System.Windows.Forms.Clipboard.SetText(row.Name);
+                    LogCopied(row.Name);
+                }
+                catch { }
+            }
+        }
+    }
+
+    private static void LogCopied(string name)
+    {
+        try
+        {
+            var logPath = System.IO.Path.Combine(AppContext.BaseDirectory, "scan_log.txt");
+            System.IO.File.AppendAllText(logPath, $"[CLIPBOARD] Copied: {name}\n");
+        }
+        catch { }
+    }

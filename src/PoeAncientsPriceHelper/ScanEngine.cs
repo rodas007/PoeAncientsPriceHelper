@@ -206,6 +206,7 @@ internal sealed class ScanEngine : IDisposable
                                 // Per-row slots: a row locks once confirmed, then stays fixed;
                                 // unpriced rows keep being retried every pass.
                                 lastRows = MergeReads(slots, reads);
+                                CheckSnipeAlert(lastRows);
                             }
                         }
                     }
@@ -280,8 +281,11 @@ internal sealed class ScanEngine : IDisposable
                 if (gemKey is not null && snapshot.TryGetValue(gemKey, out var gemEntry))
                     rows.Add(new PriceRow(stableY, row.RawText, gemEntry.DivineValue, gemEntry.ExaltedValue,
                         gemEntry.ChaosValue, true, row.Multiplier, gemKey, true));
+                else if (TryResolveGemKeyWithRange(row.NormalizedName, snapshot, out _, out var minP, out var maxP) && minP > 0)
+                    // Level unknown but gem type recognized → show price range instead of "?"
+                    rows.Add(new PriceRow(stableY, row.RawText, minP, 0m, 0m, true, row.Multiplier, row.NormalizedName, false));
                 else
-                    // Recognised as an uncut gem but type+level didn't pin to a known price → '?', never fuzzy.
+                    // Completely unknown gem → "?"
                     rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, 0m, false, row.Multiplier, row.NormalizedName));
                 continue;
             }
@@ -499,3 +503,62 @@ internal sealed class ScanEngine : IDisposable
         _cts?.Dispose();
     }
 }
+
+    // --- Snipe sound alert ---
+    private bool _lastSnipeState;
+
+    private void CheckSnipeAlert(IReadOnlyList<PriceRow> rows)
+    {
+        if (!_config.SnipeSoundAlert) return;
+        bool anySnipe = rows.Any(r => r.IsSnipe && r.HasPrice);
+        // Only beep on NEW snipes (not every frame while one is visible)
+        if (anySnipe && !_lastSnipeState)
+        {
+            try { System.Media.SystemSounds.Beep.Play(); } catch { }
+        }
+        _lastSnipeState = anySnipe;
+    }
+
+    // --- Gem level fuzzy: show range instead of "?" when level is uncertain ---
+    private static bool TryResolveGemKeyWithRange(string normalizedName, IReadOnlyDictionary<string, PriceEntry> snapshot, out string? key, out decimal minPrice, out decimal maxPrice)
+    {
+        key = null;
+        minPrice = 0;
+        maxPrice = 0;
+
+        if (!normalizedName.Contains("gem")) return false;
+        var type = Regex.Match(normalizedName, @"\b(skill|spirit|support)\b");
+        if (!type.Success) return false;
+
+        var lvl = Regex.Match(normalizedName, @"\blevel\s+(\d+)\b");
+        if (lvl.Success)
+        {
+            // Exact level found
+            key = $"uncut {type.Groups[1].Value} gem level {lvl.Groups[1].Value}";
+            return true;
+        }
+
+        // No level found — find the price range for this gem type
+        var gemType = type.Groups[1].Value;
+        var prefix = $"uncut {gemType} gem level ";
+        var matchingKeys = snapshot.Keys
+            .Where(k => k.StartsWith(prefix, StringComparison.Ordinal))
+            .OrderBy(k => k)
+            .ToList();
+
+        if (matchingKeys.Count == 0) return false;
+
+        decimal min = decimal.MaxValue, max = decimal.MinValue;
+        foreach (var k in matchingKeys)
+        {
+            var entry = snapshot[k];
+            if (entry.DivineValue > 0 && entry.DivineValue < min) min = entry.DivineValue;
+            if (entry.DivineValue > max) max = entry.DivineValue;
+        }
+
+        if (min == decimal.MaxValue) return false;
+
+        minPrice = min;
+        maxPrice = max;
+        return true;
+    }

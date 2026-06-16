@@ -27,6 +27,15 @@ internal sealed class AppConfig
     public string ReferencePixelColor { get; set; } = "#000000"; // kept for JSON backwards compat, unused
     public string CustomPricesPath { get; set; } = "custom_prices.json";
 
+    /// <summary>Price refresh interval in minutes. Default: 30.</summary>
+    public int RefreshIntervalMinutes { get; set; } = 30;
+
+    /// <summary>Play a sound when a snipe is detected.</summary>
+    public bool SnipeSoundAlert { get; set; } = true;
+
+    /// <summary>Auto-detect game window for monitor selection.</summary>
+    public bool AutoDetectGameWindow { get; set; } = true;
+
     public Rectangle RegionRect
     {
         get => new(RegionX, RegionY, RegionWidth, RegionHeight);
