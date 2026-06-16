@@ -271,8 +271,7 @@ internal sealed class PriceOverlayForm : Form
             : total.ToString(fmt, inv);
 
         DrawBackdrop(g, x, screenY, IconSize + 2 + TextWidth(g, label));
-        DrawIcon(g,
-            useDivine ? _icons.Divine : useChaos ? _icons.Exalted : _icons.Exalted,
+        DrawIcon(g, useDivine ? _icons.Divine : _icons.Exalted,
             useDivine ? "d" : useChaos ? "c" : "ex", x, iconY);
 
         // Most valuable row → bright green; divine=gold, chaos=orange, exalted=white.

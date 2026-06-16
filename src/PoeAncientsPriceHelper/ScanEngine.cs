@@ -327,8 +327,10 @@ internal sealed class ScanEngine : IDisposable
             }
 
             if (entry != null)
+            {
                 bool isSnipe = history.IsSnipe(matchedKey, entry.DivineValue, out _);
                 rows.Add(new PriceRow(stableY, row.RawText, entry.DivineValue, entry.ExaltedValue, entry.ChaosValue, true, row.Multiplier, matchedKey, exact, MemeKind.None, isSnipe));
+            }
             else
                 rows.Add(new PriceRow(stableY, row.RawText, 0m, 0m, 0m, false, row.Multiplier, row.NormalizedName));
         }
