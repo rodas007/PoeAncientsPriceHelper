@@ -251,14 +251,40 @@ internal sealed class PriceOverlayForm : Form
         int iconY = screenY - IconSize / 2;
         int mult = Math.Max(1, row.Multiplier);
 
-        // Tier: divine (>=1d) → exalted (>=0.05d) → chaos (<0.05d)
-        bool useDivine = row.DivineValue >= 1.0m;
-        bool useChaos = !useDivine && row.DivineValue < 0.05m && row.ChaosValue > 0;
+        // Currency display mode: Exalted (default) / Chaos / Divine
+        var mode = PriceOverlayManager.Config?.CurrencyDisplayMode ?? "Exalted";
         decimal unit;
         string fmt;
-        if (useDivine) { unit = row.DivineValue; fmt = "0.00"; }
-        else if (useChaos) { unit = row.ChaosValue; fmt = "0.#"; }
-        else { unit = row.ExaltedValue; fmt = "0.#"; }
+        string iconKey;
+        bool showCrossCurrency = false;
+        decimal crossCurrencyValue = 0m;
+
+        if (mode == "Divine")
+        {
+            unit = row.DivineValue;
+            fmt = "0.00";
+            iconKey = "d";
+        }
+        else if (mode == "Chaos")
+        {
+            unit = row.ChaosValue;
+            fmt = "0.#";
+            iconKey = "c";
+        }
+        else // Exalted
+        {
+            unit = row.ExaltedValue;
+            fmt = "0.#";
+            iconKey = "ex";
+            // Cross-currency: if price > 1 Divine and setting enabled, show divine equivalent
+            if (PriceOverlayManager.Config?.ShowCrossCurrency == true
+                && PriceOverlayManager.Config.ExaltedDivineRate > 0
+                && row.DivineValue >= 1.0m)
+            {
+                showCrossCurrency = true;
+                crossCurrencyValue = row.DivineValue;
+            }
+        }
         decimal total = unit * mult;
 
         // Always format prices with a '.' decimal separator regardless of the machine's locale —
@@ -271,13 +297,22 @@ internal sealed class PriceOverlayForm : Form
             : total.ToString(fmt, inv);
 
         DrawBackdrop(g, x, screenY, IconSize + 2 + TextWidth(g, label));
-        DrawIcon(g, useDivine ? _icons.Divine : _icons.Exalted,
-            useDivine ? "d" : useChaos ? "c" : "ex", x, iconY);
+        DrawIcon(g, iconKey == "d" ? _icons.Divine : _icons.Exalted,
+            iconKey, x, iconY);
+
+        // Cross-currency display: show divine equivalent next to exalted price
+        if (showCrossCurrency)
+        {
+            string crossLabel = $" ({crossCurrencyValue.ToString("0.00", inv)}d)";
+            int crossX = x + IconSize + 2 + TextWidth(g, label) + 4;
+            using var crossBrush = new SolidBrush(Color.Gold);
+            g.DrawString(crossLabel, _priceFont, crossBrush, crossX, textY);
+        }
 
         // Most valuable row → bright green; divine=gold, chaos=orange, exalted=white.
         var color = highlightTop ? Color.FromArgb(80, 255, 120)
-            : useDivine ? Color.Gold
-            : useChaos ? Color.FromArgb(255, 165, 0)  // orange for chaos
+            : iconKey == "d" ? Color.Gold
+            : iconKey == "c" ? Color.FromArgb(255, 165, 0)  // orange for chaos
             : Color.White;
         using var brush = new SolidBrush(color);
         // Vertically center the (now smaller) text against the row, not the icon top.
@@ -390,6 +425,8 @@ internal static class PriceOverlayManager
     private static PriceOverlayForm? _form;
     private static Thread? _thread;
     private static readonly object _lock = new();
+    /// <summary>Shared config for currency mode / cross-currency settings. Set before EnsureVisible.</summary>
+    internal static AppConfig? Config { get; set; }
 
     public static void EnsureVisible(Rectangle regionRect, int xOffset, IconCache icons)
     {

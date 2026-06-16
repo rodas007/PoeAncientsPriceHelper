@@ -121,6 +121,16 @@ public partial class MainWindow : MetroWindow
             { RefreshBox.SelectedItem = item; break; }
         }
         SoundAlertCheck.IsChecked = _config.SnipeSoundAlert;
+
+        // Restore currency display mode
+        foreach (System.Windows.Controls.ComboBoxItem item in CurrencyModeBox.Items)
+        {
+            if (item.Tag is string tag && tag == _config.CurrencyDisplayMode)
+            { CurrencyModeBox.SelectedItem = item; break; }
+        }
+        CrossCurrencyCheck.IsChecked = _config.ShowCrossCurrency;
+        ExpensiveSoundCheck.IsChecked = _config.ExpensiveItemSound;
+
         _loading = false;
     }
 
@@ -163,6 +173,9 @@ public partial class MainWindow : MetroWindow
         await Task.WhenAll(
             _repo.InitialFetchAsync(_config),
             _icons.LoadAsync());
+
+        // Load cached exalted→divine rate (updated each successful fetch)
+        PriceRepository.LoadExaltedRate(_config);
 
         _repo.StartAutoRefresh(_config);
 
@@ -450,3 +463,31 @@ public partial class MainWindow : MetroWindow
         _config.SnipeSoundAlert = SoundAlertCheck.IsChecked == true;
         ConfigStore.Save(_config);
     }
+
+    // --- Currency display mode ---
+    private void CurrencyMode_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading) return;
+        if (CurrencyModeBox.SelectedItem is System.Windows.Controls.ComboBoxItem item && item.Tag is string tag)
+        {
+            _config.CurrencyDisplayMode = tag;
+            ConfigStore.Save(_config);
+        }
+    }
+
+    // --- Cross-currency display toggle ---
+    private void CrossCurrency_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        _config.ShowCrossCurrency = CrossCurrencyCheck.IsChecked == true;
+        ConfigStore.Save(_config);
+    }
+
+    // --- Expensive item sound toggle ---
+    private void ExpensiveSound_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        _config.ExpensiveItemSound = ExpensiveSoundCheck.IsChecked == true;
+        ConfigStore.Save(_config);
+    }
+}

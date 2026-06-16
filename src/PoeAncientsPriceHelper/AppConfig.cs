@@ -33,8 +33,20 @@ internal sealed class AppConfig
     /// <summary>Play a sound when a snipe is detected.</summary>
     public bool SnipeSoundAlert { get; set; } = true;
 
+    /// <summary>Play an extra-loud alert for high-value snipes (>1 Divine).</summary>
+    public bool ExpensiveItemSound { get; set; } = true;
+
+    /// <summary>Currency display mode: Exalted, Chaos, or Divine.</summary>
+    public string CurrencyDisplayMode { get; set; } = "Exalted";
+
+    /// <summary>When in Exalted mode and price >1 Divine, show divine equivalent next to price.</summary>
+    public bool ShowCrossCurrency { get; set; } = false;
+
     /// <summary>Auto-detect game window for monitor selection.</summary>
     public bool AutoDetectGameWindow { get; set; } = true;
+
+    /// <summary>Cached Exalted → Divine exchange rate from poe.ninja. Updated each price fetch.</summary>
+    public decimal ExaltedDivineRate { get; set; } = 0m;
 
     public Rectangle RegionRect
     {

@@ -105,6 +105,10 @@ internal sealed class PriceRepository : IDisposable
             _prices = new ReadOnlyDictionary<string, PriceEntry>(dict);
             History.RecordSnapshot(_prices);
             SaveCache(dict);
+
+            // Extract exalted→divine rate from Currency type (primary is "divine", rates.exalted = exalted per divine)
+            await ExtractAndSaveExaltedRate(config.LeagueName, config, ct);
+
             LastFetchedAt = DateTime.Now;
             PricesUpdated?.Invoke();
         }
@@ -140,6 +144,54 @@ internal sealed class PriceRepository : IDisposable
 
         var json = await resp.Content.ReadAsStringAsync(ct);
         return ParseResponse(json);
+    }
+
+    /// <summary>
+    /// Fetch Currency type to extract exalted→divine rate and cache it locally.
+    /// In softcore leagues, primary = "divine" and rates.exalted = exalted per 1 divine.
+    /// So 1 exalted = 1/rates.exalted divines.
+    /// </summary>
+    private async Task ExtractAndSaveExaltedRate(string league, AppConfig config, CancellationToken ct)
+    {
+        try
+        {
+            var slug = league.Replace(" ", "").ToLowerInvariant();
+            var url = $"https://poe.ninja/poe2/api/economy/exchange/current/overview?league={Uri.EscapeDataString(league)}&type=Currency";
+            var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36");
+            req.Headers.TryAddWithoutValidation("Referer", $"https://poe.ninja/poe2/economy/{slug}/currency");
+
+            var resp = await _http.SendAsync(req, ct);
+            if (!resp.IsSuccessStatusCode) return;
+
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            var obj = JObject.Parse(json);
+            var core = obj["core"];
+            var primary = core?["primary"]?.Value<string>() ?? "divine";
+            var rates = core?["rates"];
+
+            decimal exaltedRate;
+            if (primary == "divine")
+            {
+                // rates.exalted = how many exalted per 1 divine → 1 exalted = 1/rates.exalted divine
+                var exaltedPerDivine = rates?["exalted"]?.Value<decimal>() ?? 0m;
+                exaltedRate = exaltedPerDivine > 0 ? Math.Round(1m / exaltedPerDivine, 6) : 0m;
+            }
+            else
+            {
+                // primary is exalted → 1 exalted = 1/rates.divine divine
+                var divinePerExalted = rates?["divine"]?.Value<decimal>() ?? 0m;
+                exaltedRate = divinePerExalted > 0 ? Math.Round(1m / divinePerExalted, 6) : 0m;
+            }
+
+            if (exaltedRate > 0)
+                SaveExaltedRate(exaltedRate, config);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[PriceRepository] exalted rate fetch failed: {ex.Message}");
+        }
     }
 
     // API shape (exchange/current/overview):
@@ -249,6 +301,7 @@ internal sealed class PriceRepository : IDisposable
 
     // --- Offline cache: save last fetch to JSON so prices survive poe.ninja downtime ---
     private static string CachePath => Path.Combine(AppContext.BaseDirectory, "price_cache.json");
+    private static string ExaltedRatePath => Path.Combine(AppContext.BaseDirectory, "exalted_rate.json");
 
     private void SaveCache(Dictionary<string, PriceEntry> dict)
     {
@@ -258,6 +311,34 @@ internal sealed class PriceRepository : IDisposable
             File.WriteAllText(CachePath, json);
         }
         catch { /* best-effort */ }
+    }
+
+    /// <summary>Save the exalted→divine exchange rate to local cache.</summary>
+    public void SaveExaltedRate(decimal rate, AppConfig config)
+    {
+        try
+        {
+            config.ExaltedDivineRate = rate;
+            var data = new { rate, savedAt = DateTime.UtcNow };
+            File.WriteAllText(ExaltedRatePath, JsonConvert.SerializeObject(data));
+        }
+        catch { /* best-effort */ }
+    }
+
+    /// <summary>Load the cached exalted→divine rate. Returns true if found.</summary>
+    public static bool LoadExaltedRate(AppConfig config)
+    {
+        try
+        {
+            if (!File.Exists(ExaltedRatePath)) return false;
+            var json = File.ReadAllText(ExaltedRatePath);
+            var obj = JObject.Parse(json);
+            var rate = obj["rate"]?.Value<decimal>() ?? 0m;
+            if (rate <= 0) return false;
+            config.ExaltedDivineRate = rate;
+            return true;
+        }
+        catch { return false; }
     }
 
     public bool LoadCache()
