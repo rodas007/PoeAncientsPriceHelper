@@ -12,8 +12,8 @@ namespace PoeAncientsPriceHelper;
 internal static class SoundManager
 {
     private static readonly string SoundsDir;
-    private static readonly string SnipeSoundPath;
-    private static readonly string ExpensiveSoundPath;
+    private static readonly string? SnipeSoundPath;
+    private static readonly string? ExpensiveSoundPath;
 
     // Volume (0.0 – 1.0). The generated fallback tones are loud by design.
     private const float DefaultVolume = 0.8f;
@@ -47,11 +47,12 @@ internal static class SoundManager
         if (ExpensiveSoundPath is not null)
             PlayFile(ExpensiveSoundPath);
         else
-            PlayGeneratedTones([
+            PlayGeneratedTones(new[]
+            {
                 (1200, 150, DefaultVolume),
                 (1600, 200, DefaultVolume),
                 (2000, 250, DefaultVolume)
-            ]);
+            });
     }
 
     /// <summary>
@@ -120,7 +121,8 @@ internal static class SoundManager
         {
             try
             {
-                var signal = new SignalGenerator(44100)
+                // NAudio 2.x: SignalGenerator(sampleRate, channelCount)
+                var signal = new SignalGenerator(44100, 1)
                 {
                     Gain = volume,
                     Frequency = frequency,
@@ -145,26 +147,21 @@ internal static class SoundManager
         {
             try
             {
-                // Build a sequential chain of tones using Concat
-                ISampleProvider? chain = null;
+                // Play tones sequentially — simple and reliable
+                using var output = new WaveOutEvent();
                 foreach (var (freq, ms, vol) in tones)
                 {
-                    var tone = new SignalGenerator(44100)
+                    var signal = new SignalGenerator(44100, 1)
                     {
                         Gain = vol,
                         Frequency = freq,
                         Type = SignalGeneratorType.Sin
-                    }.Take(TimeSpan.FromMilliseconds(ms));
-
-                    chain = chain is null ? tone : new ConcatSampleProvider(chain, tone);
+                    };
+                    var take = signal.Take(TimeSpan.FromMilliseconds(ms));
+                    output.Init(take);
+                    output.Play();
+                    Thread.Sleep(ms + 30);
                 }
-                if (chain is null) return;
-
-                using var output = new WaveOutEvent();
-                output.Init(chain);
-                output.Play();
-                var totalMs = tones.Sum(t => t.ms) + 100;
-                Thread.Sleep(totalMs);
             }
             catch (Exception ex)
             {
