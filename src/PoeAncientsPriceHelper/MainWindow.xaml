@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:mah="http://metro.mahapps.com/winfx/xaml/controls"
-        Title="Poe Ancients Price Helper" Height="450" Width="500"
+        Title="Poe Ancients Price Helper" Height="480" Width="500"
         Icon="app.ico"
         ResizeMode="CanMinimize"
         WindowStartupLocation="CenterScreen"
@@ -22,17 +22,18 @@
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>  <!-- 0: League -->
+            <RowDefinition Height="Auto"/>  <!-- 1: Region -->
+            <RowDefinition Height="Auto"/>  <!-- 2: Start/Stop key -->
+            <RowDefinition Height="Auto"/>  <!-- 3: Debug key -->
+            <RowDefinition Height="Auto"/>  <!-- 4: Calibrate key -->
+            <RowDefinition Height="Auto"/>  <!-- 5: Calibrate buttons -->
+            <RowDefinition Height="Auto"/>  <!-- 6: Refresh + sound checkbox -->
+            <RowDefinition Height="Auto"/>  <!-- 7: Currency mode -->
+            <RowDefinition Height="Auto"/>  <!-- 8: Sound status -->
+            <RowDefinition Height="Auto"/>  <!-- 9: Status label -->
+            <RowDefinition Height="Auto"/>  <!-- 10: Start button -->
+            <RowDefinition Height="*"/>     <!-- 11: Bottom bar -->
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="140"/>
@@ -87,6 +88,9 @@
             <CheckBox x:Name="SoundAlertCheck" Content="Snipe sound" IsChecked="True"
                       Margin="16,0,0,0" VerticalAlignment="Center" Foreground="#999" FontSize="11"
                       Checked="SoundAlert_Changed" Unchecked="SoundAlert_Changed"/>
+            <Button x:Name="SoundsFolderButton" Content="🔊 Sounds" Padding="8,2" FontSize="10"
+                    Click="SoundsFolder_Click" Margin="8,0,0,0"
+                    ToolTip="Open sounds/ folder — drop snipe.mp3 and expensive.mp3 to customise alerts"/>
         </StackPanel>
 
         <StackPanel Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,4,0,0">
@@ -105,30 +109,34 @@
         </StackPanel>
 
         <TextBlock Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2"
+                   x:Name="SoundStatusLabel"
+                   Text="" Foreground="#555" FontSize="10" Margin="0,2,0,0"/>
+
+        <TextBlock Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2"
                    x:Name="StatusLabel"
                    Text="Idle — prices not loaded"
                    Foreground="#666" FontSize="11" Margin="0,10,0,0"/>
 
-        <Button Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2"
+        <Button Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
                 x:Name="StartStopButton"
                 Content="Start" IsEnabled="False"
                 Margin="0,10,0,0"
                 Background="#1A3A1A" Foreground="#66FF66" BorderBrush="#337733"
                 Click="StartStopButton_Click"/>
 
-        <TextBlock Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
+        <TextBlock Grid.Row="11" Grid.Column="0" Grid.ColumnSpan="2"
                    x:Name="VersionLabel"
                    HorizontalAlignment="Left" VerticalAlignment="Bottom"
                    Foreground="#666" FontSize="11"/>
 
-        <TextBlock Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
+        <TextBlock Grid.Row="11" Grid.Column="0" Grid.ColumnSpan="2"
                    x:Name="UpdateLink"
                    HorizontalAlignment="Center" VerticalAlignment="Bottom"
                    Foreground="#FF5555" FontSize="11" FontWeight="SemiBold"
                    Cursor="Hand" Visibility="Collapsed" TextDecorations="Underline"
                    MouseLeftButtonUp="UpdateLink_Click"/>
 
-        <Button Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
+        <Button Grid.Row="11" Grid.Column="0" Grid.ColumnSpan="2"
                 x:Name="DonateButton"
                 Content="☕ Buy me a coffee"
                 HorizontalAlignment="Right" VerticalAlignment="Bottom"

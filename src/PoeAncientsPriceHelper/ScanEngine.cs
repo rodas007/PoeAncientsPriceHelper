@@ -514,19 +514,13 @@ internal sealed class ScanEngine : IDisposable
         // Only beep on NEW snipes (not every frame while one is visible)
         if (anySnipe && !_lastSnipeState)
         {
-            try { System.Media.SystemSounds.Beep.Play(); } catch { }
+            SoundManager.PlaySnipeAlert();
         }
 
-        // Extra-loud alert for expensive snipes (>1 Divine): double beep with higher pitch
+        // Extra-loud alert for expensive snipes (>1 Divine): ascending tones
         if (_config.ExpensiveItemSound && anyExpensiveSnipe && !_lastExpensiveState)
         {
-            try
-            {
-                Console.Beep(1200, 150);  // High pitch
-                Console.Beep(1600, 200);  // Higher pitch, longer
-                Console.Beep(2000, 250);  // Highest pitch, longest
-            }
-            catch { /* Console.Beep not supported on some systems */ }
+            SoundManager.PlayExpensiveAlert();
         }
 
         _lastSnipeState = anySnipe;

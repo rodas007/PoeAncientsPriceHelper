@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http;
 using System.Windows;
 using MahApps.Metro.Controls;
@@ -130,6 +131,9 @@ public partial class MainWindow : MetroWindow
         }
         CrossCurrencyCheck.IsChecked = _config.ShowCrossCurrency;
         ExpensiveSoundCheck.IsChecked = _config.ExpensiveItemSound;
+
+        // Show loaded sound info
+        SoundStatusLabel.Text = SoundManager.SoundStatus;
 
         _loading = false;
     }
@@ -488,5 +492,19 @@ public partial class MainWindow : MetroWindow
         if (_loading) return;
         _config.ExpensiveItemSound = ExpensiveSoundCheck.IsChecked == true;
         ConfigStore.Save(_config);
+    }
+
+    // --- Open sounds folder ---
+    private void SoundsFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var soundsDir = System.IO.Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory, "sounds");
+        if (!System.IO.Directory.Exists(soundsDir))
+            System.IO.Directory.CreateDirectory(soundsDir);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = soundsDir,
+            UseShellExecute = true
+        });
     }
 }
